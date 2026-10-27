@@ -48,3 +48,4 @@ venv.bak/
 # Temporary and test artifacts
 scratch/
 *.tmp
+readme
