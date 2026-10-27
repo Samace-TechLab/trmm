@@ -14,6 +14,7 @@ import io
 import logging
 import threading
 import errno
+import time
 from typing import Dict, Any, Optional
 from PIL import Image
 
@@ -215,19 +216,30 @@ class AgentGenerator:
 
         # 3. Create install.bat for the zip package
         install_bat = f"""@echo off
-set "INSTALL_DIR=C:\\Program Files\\{app_name}_{agent_id}"
+setlocal enabledelayedexpansion
+title {app_title} Setup — {endpoint_tag}
 
 echo [*] Terminating previous {app_title} processes...
 taskkill /F /IM {app_name}.exe 2>nul
 taskkill /F /IM TRMM_Agent.exe 2>nul
 timeout /t 1 /nobreak >nul 2>&1
 
-echo [*] Cleaning up old startup shortcuts and VBS scripts...
-del /f /q "%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\\*.vbs" 2>nul
-del /f /q "%ProgramData%\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\\*.vbs" 2>nul
-del /f /q "%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\\*.lnk" 2>nul
-del /f /q "%ProgramData%\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\\*.lnk" 2>nul
+echo [*] Cleaning up old startup shortcuts...
+del /f /q "%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\\{app_name}*.lnk" 2>nul
+del /f /q "%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\\{app_name}*.vbs" 2>nul
+del /f /q "%ProgramData%\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\\{app_name}*.lnk" 2>nul
+del /f /q "%ProgramData%\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\\{app_name}*.vbs" 2>nul
 
+net session >nul 2>&1
+if %errorlevel% == 0 (
+    set "INSTALL_DIR=%ProgramFiles%\\{app_name}_{agent_id}"
+    set "IS_ADMIN=1"
+) else (
+    set "INSTALL_DIR=%LOCALAPPDATA%\\{app_name}_{agent_id}"
+    set "IS_ADMIN=0"
+)
+
+echo [*] Installing to %INSTALL_DIR%...
 mkdir "%INSTALL_DIR%" 2>nul
 xcopy /E /Y /I "%~dp0*" "%INSTALL_DIR%\\" >nul
 
@@ -235,23 +247,43 @@ if exist "%INSTALL_DIR%\\TRMM_Agent.exe" if not exist "%INSTALL_DIR%\\{app_name}
     ren "%INSTALL_DIR%\\TRMM_Agent.exe" "{app_name}.exe"
 )
 
+if not exist "%INSTALL_DIR%\\{app_name}.exe" (
+    echo [!] ERROR: Installation extraction failed. {app_name}.exe not found in %INSTALL_DIR%
+    pause
+    exit /b 1
+)
+
 {"" if not auto_start else f'''echo [*] Configuring silent auto-start persistence...
-powershell -NoProfile -Command "Unblock-File -Path '%INSTALL_DIR%\\{app_name}.exe'" >nul 2>&1
+powershell -NoProfile -ExecutionPolicy Bypass -Command "Unblock-File -Path '%INSTALL_DIR%\\{app_name}.exe'" >nul 2>&1
 reg add "HKCU\\Software\\Microsoft\\Windows NT\\CurrentVersion\\AppCompatFlags\\Layers" /v "%INSTALL_DIR%\\{app_name}.exe" /t REG_SZ /d "~ RUNASINVOKER" /f >nul 2>&1
-reg add "HKLM\\Software\\Microsoft\\Windows NT\\CurrentVersion\\AppCompatFlags\\Layers" /v "%INSTALL_DIR%\\{app_name}.exe" /t REG_SZ /d "~ RUNASINVOKER" /f >nul 2>&1
-reg delete "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run" /v "{app_name}" /f >nul 2>&1
-reg delete "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run" /v "TRMM_Agent" /f >nul 2>&1
-reg delete "HKCU\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run" /v "Agent_Workstation-01" /f >nul 2>&1
 reg add "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run" /v "{app_name}" /t REG_SZ /d "\\"%INSTALL_DIR%\\{app_name}.exe\\"" /f >nul 2>&1
-schtasks /Create /TN "{app_name}_Persist" /TR "\\"%INSTALL_DIR%\\{app_name}.exe\\"" /SC ONSTART /RU SYSTEM /RL HIGHEST /DELAY 0000:10 /F >nul 2>&1
-schtasks /Create /TN "{app_name}_User" /TR "\\"%INSTALL_DIR%\\{app_name}.exe\\"" /SC ONLOGON /RL HIGHEST /F >nul 2>&1
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$vbs = [Environment]::GetFolderPath('Startup') + '\\{app_name}.vbs'; $c = @('Set ws = CreateObject(\"WScript.Shell\")', 'ws.Environment(\"Process\")(\"__COMPAT_LAYER\") = \"RunAsInvoker\"', 'ws.Run \"\"\"%INSTALL_DIR%\\{app_name}.exe\"\"\", 0, False'); [IO.File]::WriteAllLines($vbs, $c); Unblock-File -Path $vbs" >nul 2>&1
+if "%IS_ADMIN%"=="1" (
+    reg add "HKLM\\Software\\Microsoft\\Windows NT\\CurrentVersion\\AppCompatFlags\\Layers" /v "%INSTALL_DIR%\\{app_name}.exe" /t REG_SZ /d "~ RUNASINVOKER" /f >nul 2>&1
+    reg delete "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run" /v "{app_name}" /f >nul 2>&1
+    reg delete "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run" /v "TRMM_Agent" /f >nul 2>&1
+    schtasks /Create /TN "{app_name}_Persist" /TR "\\"%INSTALL_DIR%\\{app_name}.exe\\"" /SC ONSTART /RU SYSTEM /RL HIGHEST /DELAY 0000:10 /F >nul 2>&1
+    schtasks /Create /TN "{app_name}_User" /TR "\\"%INSTALL_DIR%\\{app_name}.exe\\"" /SC ONLOGON /RL HIGHEST /F >nul 2>&1
+)
 '''}
 
-start "" "%INSTALL_DIR%\\{app_name}.exe"
+start "" /D "%INSTALL_DIR%" "%INSTALL_DIR%\\{app_name}.exe" <nul >nul 2>&1
 echo [OK] {app_title} is active!
+timeout /t 3 /nobreak >nul 2>&1
 """
         with open(os.path.join(build_dir, "install.bat"), "w", encoding="utf-8") as f:
             f.write(install_bat)
+
+        # Write install.vbs inside package for silent execution
+        offline_vbs = f"""' Tactical RMM — Offline Package Installer
+On Error Resume Next
+Set ws = CreateObject("WScript.Shell")
+Set fso = CreateObject("Scripting.FileSystemObject")
+currentDir = fso.GetParentFolderName(WScript.ScriptFullName)
+ws.Run chr(34) & currentDir & "\\install.bat" & chr(34), 0, False
+"""
+        with open(os.path.join(build_dir, "install.vbs"), "w", encoding="utf-8") as vf:
+            vf.write(offline_vbs)
 
         # 4. Compress into zip package
         zip_filename = f"{app_name}_{endpoint_tag}_{arch}.zip"
@@ -296,8 +328,23 @@ echo [OK] {app_title} is active!
 
         # 7. Create Single-File Bootstrap Installer (.bat)
         download_url = f"{http_server_url}/api/agents/download/{zip_filename}"
+        from urllib.parse import urlsplit
+        parsed_srv = urlsplit(server_url)
+        port_part = f":{parsed_srv.port}" if parsed_srv.port else ":8000"
+        fallback_base = f"http://127.0.0.1{port_part}"
+        fallback_url = f"{fallback_base}/api/agents/download/{zip_filename}"
         bootstrap_filename = f"install_{app_name}.bat"
         bootstrap_path = os.path.join(OUTPUT_DIR, bootstrap_filename)
+
+        zip_urls = [download_url]
+        if fallback_url != download_url:
+            zip_urls.append(fallback_url)
+        zip_urls_ps = ", ".join(f"'{u}'" for u in zip_urls)
+
+        bootstrap_urls = [f"{http_server_url}/api/agents/bootstrap/{bootstrap_filename}"]
+        if fallback_base != http_server_url:
+            bootstrap_urls.append(f"{fallback_base}/api/agents/bootstrap/{bootstrap_filename}")
+        bootstrap_urls_ps = ", ".join(f"'{u}'" for u in bootstrap_urls)
 
         bootstrap_script = f"""@echo off
 setlocal enabledelayedexpansion
@@ -310,47 +357,120 @@ timeout /t 1 /nobreak >nul 2>&1
 
 echo [*] Cleaning up old startup shortcuts...
 del /f /q "%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\\{app_name}*.lnk" 2>nul
+del /f /q "%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\\{app_name}*.vbs" 2>nul
 del /f /q "%ProgramData%\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\\{app_name}*.lnk" 2>nul
-del /f /q "%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\\TRMM_Agent*.lnk" 2>nul
-del /f /q "%ProgramData%\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\\TRMM_Agent*.lnk" 2>nul
+del /f /q "%ProgramData%\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\\{app_name}*.vbs" 2>nul
 
-set "INSTALL_DIR=C:\\Program Files\\{app_name}_{agent_id}"
+net session >nul 2>&1
+if %errorlevel% == 0 (
+    set "INSTALL_DIR=%ProgramFiles%\\{app_name}_{agent_id}"
+    set "IS_ADMIN=1"
+) else (
+    set "INSTALL_DIR=%LOCALAPPDATA%\\{app_name}_{agent_id}"
+    set "IS_ADMIN=0"
+)
+
 set "TEMP_ZIP=%TEMP%\\{app_name.lower()}_{agent_id}.zip"
+if exist "%TEMP_ZIP%" del /f /q "%TEMP_ZIP%" 2>nul
 
 echo [*] Downloading {app_title} package...
-powershell -Command "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri '{download_url}' -OutFile '%TEMP_ZIP%'"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ProgressPreference = 'SilentlyContinue'; [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13; [System.Net.ServicePointManager]::ServerCertificateValidationCallback = {{$true}}; $urls = @({zip_urls_ps}); foreach ($u in $urls) {{ try {{ $req = [System.Net.HttpWebRequest]::Create($u); $req.Timeout = 5000; $req.ReadWriteTimeout = 60000; $res = $req.GetResponse(); $s = $res.GetResponseStream(); $fs = [System.IO.File]::Create('%TEMP_ZIP%'); $s.CopyTo($fs); $fs.Close(); $s.Close(); $res.Close(); if ((Test-Path '%TEMP_ZIP%') -and (Get-Item '%TEMP_ZIP%').Length -gt 1000) {{ break }} }} catch {{ if (Test-Path '%TEMP_ZIP%') {{ Remove-Item '%TEMP_ZIP%' -Force -ErrorAction SilentlyContinue }} }} }}"
+
+if not exist "%TEMP_ZIP%" (
+    echo [!] ERROR: Failed to download agent package from {download_url}
+    echo [!] Ensure the Master Hub server is online and accessible.
+    pause
+    exit /b 1
+)
 
 echo [*] Extracting package to %INSTALL_DIR%...
 mkdir "%INSTALL_DIR%" 2>nul
-powershell -Command "Expand-Archive -Path '%TEMP_ZIP%' -DestinationPath '%INSTALL_DIR%' -Force"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ProgressPreference = 'SilentlyContinue'; Expand-Archive -Path '%TEMP_ZIP%' -DestinationPath '%INSTALL_DIR%' -Force"
 del /f /q "%TEMP_ZIP%" 2>nul
 
 if exist "%INSTALL_DIR%\\TRMM_Agent.exe" if not exist "%INSTALL_DIR%\\{app_name}.exe" (
     ren "%INSTALL_DIR%\\TRMM_Agent.exe" "{app_name}.exe"
 )
 
-{"" if not auto_start else f'''echo [*] Configuring silent auto-start persistence (Zero UAC prompts)...
-powershell -NoProfile -Command "Unblock-File -Path '%INSTALL_DIR%\\{app_name}.exe'" >nul 2>&1
+if not exist "%INSTALL_DIR%\\{app_name}.exe" (
+    echo [!] ERROR: Installation extraction failed. {app_name}.exe not found in %INSTALL_DIR%
+    pause
+    exit /b 1
+)
+
+{"" if not auto_start else f'''echo [*] Configuring silent auto-start persistence...
+powershell -NoProfile -ExecutionPolicy Bypass -Command "Unblock-File -Path '%INSTALL_DIR%\\{app_name}.exe'" >nul 2>&1
 reg add "HKCU\\Software\\Microsoft\\Windows NT\\CurrentVersion\\AppCompatFlags\\Layers" /v "%INSTALL_DIR%\\{app_name}.exe" /t REG_SZ /d "~ RUNASINVOKER" /f >nul 2>&1
-reg add "HKLM\\Software\\Microsoft\\Windows NT\\CurrentVersion\\AppCompatFlags\\Layers" /v "%INSTALL_DIR%\\{app_name}.exe" /t REG_SZ /d "~ RUNASINVOKER" /f >nul 2>&1
-reg delete "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run" /v "{app_name}" /f >nul 2>&1
-reg delete "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run" /v "TRMM_Agent" /f >nul 2>&1
-powershell -NoProfile -Command "$vbs = [Environment]::GetFolderPath('Startup') + '\\{app_name}.vbs'; $c = @('Set ws = CreateObject(\"WScript.Shell\")', 'ws.Environment(\"Process\")(\"__COMPAT_LAYER\") = \"RunAsInvoker\"', 'ws.Run \"\"\"%INSTALL_DIR%\\{app_name}.exe\"\"\", 0, False'); [IO.File]::WriteAllLines($vbs, $c); Unblock-File -Path $vbs" >nul 2>&1
-reg add "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run" /v "{app_name}" /t REG_SZ /d "wscript.exe \\"%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\\{app_name}.vbs\\"" /f >nul 2>&1
-schtasks /Create /TN "{app_name}_Persist" /TR "\\"%INSTALL_DIR%\\{app_name}.exe\\"" /SC ONSTART /RU SYSTEM /RL HIGHEST /DELAY 0000:10 /F >nul 2>&1
-schtasks /Create /TN "{app_name}_User" /TR "\\"%INSTALL_DIR%\\{app_name}.exe\\"" /SC ONLOGON /RL HIGHEST /F >nul 2>&1
+reg add "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run" /v "{app_name}" /t REG_SZ /d "\\"%INSTALL_DIR%\\{app_name}.exe\\"" /f >nul 2>&1
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$vbs = [Environment]::GetFolderPath('Startup') + '\\{app_name}.vbs'; $c = @('Set ws = CreateObject(\"WScript.Shell\")', 'ws.Environment(\"Process\")(\"__COMPAT_LAYER\") = \"RunAsInvoker\"', 'ws.Run \"\"\"%INSTALL_DIR%\\{app_name}.exe\"\"\", 0, False'); [IO.File]::WriteAllLines($vbs, $c); Unblock-File -Path $vbs" >nul 2>&1
+if "%IS_ADMIN%"=="1" (
+    reg add "HKLM\\Software\\Microsoft\\Windows NT\\CurrentVersion\\AppCompatFlags\\Layers" /v "%INSTALL_DIR%\\{app_name}.exe" /t REG_SZ /d "~ RUNASINVOKER" /f >nul 2>&1
+    reg delete "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run" /v "{app_name}" /f >nul 2>&1
+    reg delete "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run" /v "TRMM_Agent" /f >nul 2>&1
+    schtasks /Create /TN "{app_name}_Persist" /TR "\\"%INSTALL_DIR%\\{app_name}.exe\\"" /SC ONSTART /RU SYSTEM /RL HIGHEST /DELAY 0000:10 /F >nul 2>&1
+    schtasks /Create /TN "{app_name}_User" /TR "\\"%INSTALL_DIR%\\{app_name}.exe\\"" /SC ONLOGON /RL HIGHEST /F >nul 2>&1
+)
 '''}
 
-start "" "%INSTALL_DIR%\\{app_name}.exe"
+start "" /D "%INSTALL_DIR%" "%INSTALL_DIR%\\{app_name}.exe" <nul >nul 2>&1
 echo [OK] {app_title} is active!
+timeout /t 3 /nobreak >nul 2>&1
 """
         with open(bootstrap_path, "w", encoding="utf-8") as f:
             f.write(bootstrap_script)
 
+        # 8. Create Single-File Bootstrap VBS Installer (.vbs)
+        try:
+            from .registry import generate_vbs_script_content, AgentRegistry
+        except (ImportError, ModuleNotFoundError):
+            try:
+                from master_hub.registry import generate_vbs_script_content, AgentRegistry
+            except Exception:
+                generate_vbs_script_content = None
+                AgentRegistry = None
+
+        vbs_filename = f"install_{app_name}.vbs"
+        bootstrap_vbs_path = os.path.join(OUTPUT_DIR, vbs_filename)
+        try:
+            if generate_vbs_script_content:
+                vbs_script = generate_vbs_script_content(app_name, app_title, endpoint_tag, agent_id, zip_urls, auto_start)
+                with open(bootstrap_vbs_path, "wb") as vf:
+                    vf.write(vbs_script.encode("utf-8"))
+                logger.info(f"Generated VBS bootstrap installer: {bootstrap_vbs_path}")
+            else:
+                bootstrap_vbs_path = None
+                vbs_filename = None
+        except Exception as e:
+            logger.warning(f"Failed to generate VBS bootstrap installer: {e}")
+            bootstrap_vbs_path = None
+            vbs_filename = None
+
         logger.info(f"Generated standalone installer: {setup_exe_path}")
         logger.info(f"Generated agent zip: {zip_path}")
 
-        return {
+        one_liner = (
+            f"$ProgressPreference = 'SilentlyContinue'; "
+            f"[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13; "
+            f"[System.Net.ServicePointManager]::ServerCertificateValidationCallback = {{$true}}; "
+            f"$b = Join-Path $env:TEMP '{bootstrap_filename}'; "
+            f"$urls = @({bootstrap_urls_ps}); "
+            f"foreach ($u in $urls) {{ "
+            f"try {{ "
+            f"$req = [System.Net.HttpWebRequest]::Create($u); "
+            f"$req.Timeout = 5000; "
+            f"$req.ReadWriteTimeout = 30000; "
+            f"$res = $req.GetResponse(); "
+            f"$s = $res.GetResponseStream(); "
+            f"$fs = [System.IO.File]::Create($b); "
+            f"$s.CopyTo($fs); "
+            f"$fs.Close(); $s.Close(); $res.Close(); "
+            f"if ((Test-Path $b) -and (Get-Item $b).Length -gt 50) {{ break }} "
+            f"}} catch {{ if (Test-Path $b) {{ Remove-Item $b -Force -ErrorAction SilentlyContinue }} }} "
+            f"}}; "
+            f"if (Test-Path $b) {{ & cmd.exe /c $b }} else {{ Write-Error 'Failed to download installer from {http_server_url}' }}"
+        )
+
+        result = {
             "installer_error": installer_error,
             "installer_ready": bool(setup_exe_path),
             "exe_path": setup_exe_path,
@@ -362,5 +482,40 @@ echo [OK] {app_title} is active!
             "bootstrap_path": bootstrap_path,
             "bootstrap_filename": bootstrap_filename,
             "bootstrap_download_url": f"/api/agents/bootstrap/{bootstrap_filename}",
-            "one_liner": f"$installer = Join-Path $env:TEMP 'trmm-install-{agent_id}.bat'; Invoke-WebRequest -Uri '{http_server_url}/api/agents/bootstrap/{bootstrap_filename}' -OutFile $installer -ErrorAction Stop; & $installer",
+            "vbs_path": bootstrap_vbs_path,
+            "vbs_filename": vbs_filename,
+            "vbs_download_url": f"/api/agents/bootstrap/{vbs_filename}" if vbs_filename else None,
+            "one_liner": one_liner,
         }
+
+        # Record in package history registry
+        try:
+            size_bytes = os.path.getsize(zip_path) if os.path.isfile(zip_path) else 0
+            mtime = time.time()
+            if AgentRegistry:
+                AgentRegistry.record_package({
+                "agent_id": agent_id,
+                "endpoint_tag": endpoint_tag,
+                "app_name": app_name,
+                "app_title": app_title,
+                "server_url": server_url,
+                "arch": arch,
+                "auto_start": auto_start,
+                "mtime": mtime,
+                "created_at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(mtime)),
+                "size_bytes": size_bytes,
+                "size_mb": round(size_bytes / (1024 * 1024), 1),
+                "zip_filename": zip_filename,
+                "zip_url": f"/api/agents/download/{zip_filename}",
+                "exe_filename": setup_exe_filename,
+                "exe_url": f"/api/agents/download/{setup_exe_filename}" if setup_exe_filename else None,
+                "bat_filename": bootstrap_filename,
+                "bat_url": f"/api/agents/bootstrap/{bootstrap_filename}",
+                "vbs_filename": vbs_filename,
+                "vbs_url": f"/api/agents/bootstrap/{vbs_filename}" if vbs_filename else None,
+                "one_liner": one_liner,
+            })
+        except Exception as e:
+            logger.warning(f"Failed to record package in registry: {e}")
+
+        return result

@@ -304,6 +304,8 @@ async def generate_agent(request: Request, req: GenerateAgentRequest):
             "zip_download_url": result.get("zip_download_url"),
             "bootstrap_filename": result.get("bootstrap_filename"),
             "bootstrap_download_url": result.get("bootstrap_download_url"),
+            "vbs_filename": result.get("vbs_filename"),
+            "vbs_download_url": result.get("vbs_download_url"),
             "one_liner": result.get("one_liner"),
         }
     except BuildStorageError as e:
@@ -315,20 +317,24 @@ async def generate_agent(request: Request, req: GenerateAgentRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/api/agents/bootstrap/{filename}")
+@app.api_route("/api/agents/bootstrap/{filename}", methods=["GET", "HEAD"])
 async def download_bootstrap_script(filename: str):
     file_path = os.path.join(OUTPUT_DIR, filename)
     if not os.path.isfile(file_path):
         raise HTTPException(status_code=404, detail="Bootstrap script not found")
+    media_type = "application/octet-stream"
     return FileResponse(
         file_path,
         filename=filename,
-        media_type="application/octet-stream",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        media_type=media_type,
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Access-Control-Allow-Origin": "*",
+        },
     )
 
 
-@app.get("/api/agents/download/{filename}")
+@app.api_route("/api/agents/download/{filename}", methods=["GET", "HEAD"])
 async def download_agent(filename: str):
     file_path = os.path.join(OUTPUT_DIR, filename)
     if not os.path.isfile(file_path):
@@ -340,6 +346,29 @@ async def download_agent(filename: str):
         media_type="application/octet-stream",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+# -------------------------------------------------------------
+# Agent Package History & Redownload Endpoints
+# -------------------------------------------------------------
+@app.get("/api/agents/history")
+async def get_agent_packages_history(request: Request):
+    if not _is_authenticated(request):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    from .registry import AgentRegistry
+    packages = AgentRegistry.get_all_packages()
+    return {"success": True, "packages": packages}
+
+
+@app.delete("/api/agents/history/{agent_id}")
+async def delete_agent_package(agent_id: str, request: Request):
+    if not _is_authenticated(request):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    from .registry import AgentRegistry
+    success = AgentRegistry.delete_package(agent_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Agent package not found")
+    return {"success": True, "message": f"Package {agent_id} deleted"}
 
 
 # -------------------------------------------------------------

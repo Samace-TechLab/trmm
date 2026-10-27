@@ -26,7 +26,7 @@ def main():
     parser.add_argument("--host", type=str, default="0.0.0.0", help="Host IP to bind (default: 0.0.0.0)")
     parser.add_argument("--port", type=int, default=8000, help="Port to listen on (default: 8000)")
     parser.add_argument("--open-browser", action="store_true", help="Auto open browser to dashboard")
-    parser.add_argument("--reload", action="store_true", default=True, help="Enable development file reloader (enabled by default)")
+    parser.add_argument("--reload", action=argparse.BooleanOptionalAction, default=True, help="Enable development file reloader (enabled by default, use --no-reload to disable)")
     args = parser.parse_args()
 
     # Ensure UTF-8 output encoding on Windows console
@@ -50,7 +50,7 @@ def main():
         threading.Thread(target=open_tab, daemon=True).start()
 
     if args.reload:
-        uvicorn.run("master_hub.app:app", host=args.host, port=args.port, log_level="info", reload=True, reload_excludes=["build/*", "dist/*", "generated_agents/*", "scratch/*", "*.zip", "*.exe", "*.bat", "*.spec", "*.log"], ws_ping_interval=15, ws_ping_timeout=30)
+        uvicorn.run("master_hub.app:app", host=args.host, port=args.port, log_level="info", reload=True, reload_dirs=[os.path.join(ROOT_DIR, "master_hub")], ws_ping_interval=15, ws_ping_timeout=30)
     else:
         uvicorn.run(app, host=args.host, port=args.port, log_level="info", reload=False, ws_ping_interval=15, ws_ping_timeout=30)
 

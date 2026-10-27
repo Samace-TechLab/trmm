@@ -139,7 +139,7 @@ session cookies remained in memory. Raw JSON evidence is under
 `diagnostics/mirror_live/agent-install-audit/` (ignored by Git).
 
 For the exact failed target, obtain its installer filename and the startup log
-at `%TEMP%\trmm_agent.log` for the Windows account running the agent. Check the
+at `%TEMP%\trmm_agent.log` for the Windows account running the agent. Check thehe
 `Loaded config`, `Dialing Master Hub`, connection error, and import error entries.
 If a service account runs the process, its temporary directory may differ from
 the interactive user's. That evidence can identify a different or additional

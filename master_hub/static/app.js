@@ -564,6 +564,8 @@ function handleBackdropClick(event, modalId) {
     if (event.target.id === modalId) {
         if (modalId === 'generatorModal') {
             closeGeneratorModal();
+        } else if (modalId === 'allAgentsModal') {
+            closeAllAgentsModal();
         } else if (modalId === 'hvncModal') {
             closeHvncSession();
         } else if (modalId === 'otaModal' || modalId === 'updateModal') {
@@ -666,15 +668,34 @@ async function submitGenerateAgent() {
             scriptLink.href = data.bootstrap_download_url;
             scriptLink.setAttribute("download", data.bootstrap_filename);
 
-            // 3. PowerShell One-Liner
+            // 3. VBScript Silent Installer
+            const vbsLink = document.getElementById("downloadVbsLink");
+            if (vbsLink) {
+                if (data.vbs_download_url) {
+                    vbsLink.href = data.vbs_download_url;
+                    vbsLink.setAttribute("download", data.vbs_filename || "install.vbs");
+                    vbsLink.onclick = null;
+                    vbsLink.style.display = "inline-flex";
+                } else {
+                    vbsLink.href = "#";
+                    vbsLink.removeAttribute("download");
+                    vbsLink.onclick = null;
+                    vbsLink.style.display = "none";
+                }
+            }
+
+            // 4. PowerShell One-Liner
             document.getElementById("oneLinerCode").value = data.one_liner;
 
-            // 4. Offline Full Zip Package
+            // 5. Offline Full Zip Package
             const zipLink = document.getElementById("downloadZipLink");
             zipLink.href = data.zip_download_url;
             zipLink.setAttribute("download", data.zip_filename);
 
             document.getElementById("buildResultCard").style.display = "block";
+            if (typeof loadAllGeneratedAgents === "function") {
+                loadAllGeneratedAgents(false);
+            }
             if (data.exe_download_url) {
                 btn.innerHTML = `<span>✓ Installer Ready</span>`;
                 showToast("Installer Built", `Download ${data.exe_filename} for deployment.`, "success");
@@ -709,6 +730,235 @@ function copyOneLiner() {
 function copyText(text, successMsg) {
     navigator.clipboard.writeText(text);
     showToast("Copied", successMsg || "Copied to clipboard", "info");
+}
+
+// -------------------------------------------------------------
+// All Previously Generated Agents Modal & Registry Management
+// -------------------------------------------------------------
+let allGeneratedPackages = [];
+
+function openAllAgentsModal() {
+    const modal = document.getElementById("allAgentsModal");
+    if (modal) {
+        modal.style.display = "flex";
+        modal.style.opacity = "1";
+        modal.style.zIndex = "9999";
+        modal.classList.add("active");
+    }
+    const searchInput = document.getElementById("allAgentsSearchInput");
+    if (searchInput) searchInput.value = "";
+    loadAllGeneratedAgents(false);
+}
+
+function closeAllAgentsModal() {
+    const modal = document.getElementById("allAgentsModal");
+    if (modal) {
+        modal.classList.remove("active");
+        modal.style.display = "none";
+        modal.style.opacity = "0";
+    }
+}
+
+function formatBytes(bytes) {
+    if (!bytes || bytes <= 0) return "0 B";
+    const k = 1024;
+    const sizes = ["B", "KB", "MB", "GB"];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + " " + sizes[i];
+}
+
+function escapeHtml(str) {
+    if (!str) return "";
+    return String(str)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
+}
+
+async function loadAllGeneratedAgents(forceToast = false) {
+    const tableBody = document.getElementById("allAgentsTableBody");
+    const countBadge = document.getElementById("allAgentsCountBadge");
+    if (tableBody) {
+        tableBody.innerHTML = `<tr><td colspan="6" style="text-align: center; color: var(--text-muted); padding: 30px;">
+            <svg class="spin" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" style="margin-right: 6px; vertical-align: middle;"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+            Loading previously generated agents...
+        </td></tr>`;
+    }
+
+    try {
+        const res = await fetch("/api/agents/history");
+        if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+        const data = await res.json();
+        if (data.success && Array.isArray(data.packages)) {
+            allGeneratedPackages = data.packages;
+            if (countBadge) {
+                countBadge.innerText = `${allGeneratedPackages.length} Package${allGeneratedPackages.length === 1 ? '' : 's'}`;
+            }
+            renderAllAgentsTable(allGeneratedPackages);
+            if (forceToast) {
+                showToast("Packages Refreshed", `Found ${allGeneratedPackages.length} generated agent package(s).`, "info");
+            }
+        } else {
+            throw new Error(data.detail || "Failed to parse package history");
+        }
+    } catch (e) {
+        if (tableBody) {
+            tableBody.innerHTML = `<tr><td colspan="6" style="text-align: center; color: #ef4444; padding: 24px;">Failed to load agents: ${escapeHtml(e.message)}</td></tr>`;
+        }
+        if (forceToast) {
+            showToast("Failed to Load Packages", e.message, "error");
+        }
+    }
+}
+
+async function downloadVbsFile(url, filename) {
+    if (!url || url === "#") return;
+    try {
+        showToast("Downloading VBScript", `Downloading ${filename}...`, "info");
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const text = await res.text();
+        const blob = new Blob([text], { type: "text/vbscript;charset=utf-8" });
+        const blobUrl = window.URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = blobUrl;
+        a.download = filename || "install.vbs";
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        setTimeout(() => window.URL.revokeObjectURL(blobUrl), 3000);
+        showToast("Download Complete", `${filename} is ready in your Downloads folder.`, "success");
+    } catch (e) {
+        window.location.href = url;
+    }
+}
+
+function renderAllAgentsTable(packages) {
+    const tableBody = document.getElementById("allAgentsTableBody");
+    if (!tableBody) return;
+
+    if (!packages || packages.length === 0) {
+        tableBody.innerHTML = `<tr><td colspan="6" style="text-align: center; color: var(--text-muted); padding: 36px;">
+            No agent packages found. Click <strong>"+ Build New Agent Package"</strong> below to create your first package.
+        </td></tr>`;
+        return;
+    }
+
+    tableBody.innerHTML = packages.map(pkg => {
+        const dateStr = pkg.created_at ? new Date(pkg.created_at).toLocaleString() : "Unknown";
+        const sizeStr = pkg.size_bytes ? formatBytes(pkg.size_bytes) : "-";
+        const tag = escapeHtml(pkg.endpoint_tag || pkg.app_name || "Agent");
+        const appName = escapeHtml(pkg.app_name || "TRMMAgent");
+        const agentId = escapeHtml(pkg.agent_id || "");
+        const serverUrl = escapeHtml(pkg.server_url || "");
+
+        // Build Download Links
+        const links = [];
+        const exeUrl = pkg.exe_download_url || pkg.exe_url;
+        if (exeUrl) {
+            links.push(`<a href="${exeUrl}" download="${escapeHtml(pkg.exe_filename || 'agent_setup.exe')}" class="btn btn-xs btn-primary" title="Download Standalone EXE Setup (.exe)">EXE</a>`);
+        }
+        const batUrl = pkg.bat_download_url || pkg.bat_url || pkg.bootstrap_download_url;
+        if (batUrl) {
+            links.push(`<a href="${batUrl}" download="${escapeHtml(pkg.bat_filename || 'install.bat')}" class="btn btn-xs btn-secondary" title="Download Batch Installer (.bat)">BAT</a>`);
+        }
+        const vbsUrl = pkg.vbs_download_url || pkg.vbs_url;
+        if (vbsUrl) {
+            const vbsName = escapeHtml(pkg.vbs_filename || 'install.vbs');
+            links.push(`<a href="${vbsUrl}" download="${vbsName}" class="btn btn-xs btn-secondary" style="background: #1e293b; border-color: #3b82f6; color: #60a5fa;" title="Download Silent VBScript Installer (.vbs)">VBS</a>`);
+        }
+        const zipUrl = pkg.zip_download_url || pkg.zip_url;
+        if (zipUrl) {
+            links.push(`<a href="${zipUrl}" download="${escapeHtml(pkg.zip_filename || 'agent.zip')}" class="btn btn-xs btn-outline" title="Download Full Offline Package (.zip)">ZIP</a>`);
+        }
+        if (pkg.one_liner) {
+            links.push(`<button type="button" class="btn btn-xs btn-outline" onclick="copyPkgOneLiner('${agentId}')" title="Copy 1-Click PowerShell Deployment Command">PS1</button>`);
+        }
+
+        return `
+            <tr>
+                <td>
+                    <div style="font-weight: 600; color: #f3f4f6; display: flex; align-items: center; gap: 6px;">
+                        <span class="status-tag-ready" style="font-size: 10px; padding: 1px 6px;">${tag}</span>
+                        <span>${appName}</span>
+                    </div>
+                    <div style="font-size: 11px; color: var(--text-muted); margin-top: 2px;">
+                        <span>Target: ${serverUrl}</span>
+                    </div>
+                </td>
+                <td>
+                    <code style="font-size: 11px; color: #38bdf8; background: rgba(56, 189, 248, 0.08); padding: 2px 6px; border-radius: 3px;">${agentId ? agentId.substring(0, 16) + '...' : '-'}</code>
+                </td>
+                <td style="color: var(--text-secondary); font-size: 11px; white-space: nowrap;">
+                    ${dateStr}
+                </td>
+                <td style="color: var(--text-muted); font-size: 11px; white-space: nowrap;">
+                    ${sizeStr}
+                </td>
+                <td>
+                    <div style="display: flex; gap: 4px; align-items: center; flex-wrap: wrap;">
+                        ${links.join("")}
+                    </div>
+                </td>
+                <td style="text-align: right;">
+                    <button type="button" class="btn btn-xs btn-outline" style="color: #ef4444; border-color: rgba(239, 68, 68, 0.35);" onclick="deleteAgentPackage('${agentId}', '${tag}')" title="Delete Package">
+                        <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+                    </button>
+                </td>
+            </tr>
+        `;
+    }).join("");
+}
+
+function filterAllAgentsTable() {
+    const search = (document.getElementById("allAgentsSearchInput")?.value || "").trim().toLowerCase();
+    if (!search) {
+        renderAllAgentsTable(allGeneratedPackages);
+        return;
+    }
+
+    const filtered = allGeneratedPackages.filter(pkg => {
+        const id = (pkg.agent_id || "").toLowerCase();
+        const tag = (pkg.endpoint_tag || "").toLowerCase();
+        const app = (pkg.app_name || "").toLowerCase();
+        const srv = (pkg.server_url || "").toLowerCase();
+        return id.includes(search) || tag.includes(search) || app.includes(search) || srv.includes(search);
+    });
+
+    renderAllAgentsTable(filtered);
+}
+
+function copyPkgOneLiner(agentId) {
+    const pkg = allGeneratedPackages.find(p => p.agent_id === agentId);
+    if (!pkg || !pkg.one_liner) {
+        showToast("Copy Failed", "PowerShell one-liner command not available for this package.", "warning");
+        return;
+    }
+    navigator.clipboard.writeText(pkg.one_liner);
+    showToast("Command Copied", `PowerShell 1-Click command copied for ${pkg.endpoint_tag || pkg.app_name}!`, "success");
+}
+
+async function deleteAgentPackage(agentId, label) {
+    if (!confirm(`Are you sure you want to delete the package for "${label}" (${agentId})? This will delete the generated zip, exe, bat, and vbs files from the server.`)) {
+        return;
+    }
+
+    try {
+        const res = await fetch(`/api/agents/history/${encodeURIComponent(agentId)}`, {
+            method: "DELETE"
+        });
+        const data = await res.json();
+        if (res.ok && data.success) {
+            showToast("Package Deleted", `Successfully removed package for ${label}.`, "success");
+            loadAllGeneratedAgents(false);
+        } else {
+            throw new Error(data.detail || "Failed to delete package");
+        }
+    } catch (e) {
+        showToast("Delete Failed", e.message, "error");
+    }
 }
 
 // -------------------------------------------------------------
